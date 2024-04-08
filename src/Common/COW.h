@@ -3,7 +3,8 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
 #include <initializer_list>
-
+#include <memory>
+#include <base/defines.h>
 
 /** Copy-on-write shared ptr.
   * Allows to work with shared immutable objects and sometimes unshare and mutate you own unique copy.
@@ -69,8 +70,6 @@
   *
   * Caveats:
   * - after a call to 'mutate' method, you can still have a reference to immutable ptr somewhere.
-  * - as 'mutable_ptr' should be unique, it's refcount is redundant - probably it would be better
-  *   to use std::unique_ptr for it somehow.
   */
 template <typename Derived>
 class COW : public boost::intrusive_ref_counter<Derived>
@@ -81,15 +80,15 @@ private:
 
 protected:
     template <typename T>
-    class mutable_ptr : public boost::intrusive_ptr<T> /// NOLINT
+    class mutable_ptr /// NOLINT
     {
     private:
-        using Base = boost::intrusive_ptr<T>;
+        std::unique_ptr<T> smart_ptr;
 
         template <typename> friend class COW;
         template <typename, typename> friend class COWHelper;
 
-        explicit mutable_ptr(T * ptr) : Base(ptr) {}
+        explicit mutable_ptr(T * ptr) : smart_ptr(ptr) {}
 
     public:
         /// Copy: not possible.
@@ -101,11 +100,42 @@ protected:
 
         /// Initializing from temporary of compatible type.
         template <typename U>
-        mutable_ptr(mutable_ptr<U> && other) : Base(std::move(other)) {} /// NOLINT
+        mutable_ptr(mutable_ptr<U> && other) : smart_ptr(std::move(other.smart_ptr)) {} /// NOLINT
 
         mutable_ptr() = default;
 
         mutable_ptr(std::nullptr_t) {} /// NOLINT
+        
+        T * get() const noexcept
+        {
+            return smart_ptr.get();
+        }
+
+        void swap(mutable_ptr<T> & other) noexcept
+        {
+            this->smart_ptr.swap(other.smart_ptr);
+        }
+
+        T & operator*() const noexcept
+        {
+            const auto ptr = smart_ptr.get();
+            chassert(ptr != nullptr);
+            return *ptr;
+        }
+
+        T * operator->() const noexcept
+        {
+            const auto ptr = smart_ptr.get();
+            chassert(ptr != nullptr);
+            return ptr;
+        }
+
+        explicit operator bool() const noexcept
+        {
+            return true && smart_ptr;
+        }
+
+        bool operator== (const mutable_ptr<T>&) const noexcept = default;
     };
 
 public:
@@ -141,7 +171,10 @@ protected:
 
         /// Move from mutable ptr: ok.
         template <typename U>
-        immutable_ptr(mutable_ptr<U> && other) : Base(std::move(other)) {} /// NOLINT
+        immutable_ptr(mutable_ptr<U> && other) : Base(other.get()) /// NOLINT
+        {
+            other.smart_ptr.reset();
+        }
 
         /// Copy from mutable ptr: not possible.
         template <typename U>
